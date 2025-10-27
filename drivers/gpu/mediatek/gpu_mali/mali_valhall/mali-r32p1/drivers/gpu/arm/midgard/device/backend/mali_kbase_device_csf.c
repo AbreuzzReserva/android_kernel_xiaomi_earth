@@ -39,8 +39,6 @@
 #include <mali_kbase_hwcnt_virtualizer.h>
 #include <mali_kbase_vinstr.h>
 
-#include "../../platform/mtk_platform_common.h"
-
 /**
  * kbase_device_firmware_hwcnt_term - Terminate CSF firmware and HWC
  *
@@ -239,11 +237,6 @@ static void kbase_device_hwcnt_backend_csf_term(struct kbase_device *kbdev)
 }
 
 static const struct kbase_device_init dev_init[] = {
-	// *** MTK ***
-	{mtk_common_device_init, mtk_common_device_term,
-			"MTK common initialization failed"},
-	{mtk_platform_device_init, mtk_platform_device_term,
-			"MTK platform initialization failed"},
 	{ assign_irqs, NULL, "IRQ search failed" },
 	{ registers_map, registers_unmap, "Register map failed" },
 	{ power_control_init, power_control_term,
@@ -273,6 +266,8 @@ static const struct kbase_device_init dev_init[] = {
 	  "Timeline stream initialization failed" },
 	{ kbase_clk_rate_trace_manager_init, kbase_clk_rate_trace_manager_term,
 	  "Clock rate trace manager initialization failed" },
+	{ kbase_lowest_gpu_freq_init, NULL,
+	  "Lowest freq initialization failed" },
 	{ kbase_device_hwcnt_backend_csf_if_init,
 	  kbase_device_hwcnt_backend_csf_if_term,
 	  "GPU hwcnt backend CSF interface creation failed" },
@@ -425,8 +420,6 @@ static int kbase_csf_firmware_deferred_init(struct kbase_device *kbdev)
 
 	lockdep_assert_held(&kbdev->fw_load_lock);
 
-	kbase_pm_context_active(kbdev);
-
 	err = kbase_csf_firmware_init(kbdev);
 	if (!err) {
 		unsigned long flags;
@@ -439,8 +432,6 @@ static int kbase_csf_firmware_deferred_init(struct kbase_device *kbdev)
 		dev_err(kbdev->dev, "Firmware initialization failed");
 	}
 
-	kbase_pm_context_idle(kbdev);
-
 	return err;
 }
 
@@ -451,6 +442,8 @@ int kbase_device_firmware_init_once(struct kbase_device *kbdev)
 	mutex_lock(&kbdev->fw_load_lock);
 
 	if (!kbdev->csf.firmware_inited) {
+		kbase_pm_context_active(kbdev);
+
 		ret = kbase_csf_firmware_deferred_init(kbdev);
 		if (ret)
 			goto out;
@@ -462,9 +455,10 @@ int kbase_device_firmware_init_once(struct kbase_device *kbdev)
 		}
 
 		kbase_csf_debugfs_init(kbdev);
+out:
+		kbase_pm_context_idle(kbdev);
 	}
 
-out:
 	mutex_unlock(&kbdev->fw_load_lock);
 
 	return ret;
