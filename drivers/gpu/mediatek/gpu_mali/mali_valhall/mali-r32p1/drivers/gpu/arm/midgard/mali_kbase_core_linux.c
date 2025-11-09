@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2010-2022 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2010-2021 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -71,6 +71,9 @@
 #endif
 #include "backend/gpu/mali_kbase_pm_internal.h"
 #include "mali_kbase_dvfs_debugfs.h"
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+#include "mali_kbase_pbha_debugfs.h"
+#endif
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -111,19 +114,6 @@
 #include <context/mali_kbase_context.h>
 
 #include <mali_kbase_caps.h>
-
-#include "platform/mtk_platform_common.h"
-#include <mtk_gpufreq.h>
-
-#if defined(MTK_GPU_BM_2) && !defined(GPU_BM_PORTING)
-#include <gpu_bm.h>
-#if IS_ENABLED(CONFIG_MTK_TINYSYS_SSPM_SUPPORT)
-#include <sspm_reservedmem_define.h>
-static phys_addr_t rec_phys_addr, rec_virt_addr;
-static unsigned long long rec_size;
-struct v1_data *gpu_info_ref;
-#endif
-#endif
 
 /* GPU IRQ Tags */
 #define	JOB_IRQ_TAG	0
@@ -171,47 +161,6 @@ static mali_kbase_capability_def kbase_caps_table[MALI_KBASE_NUM_CAPS] = {
 	{ 11,  2 }              /* MEM_PROTECTED	*/
 #endif
 };
-
-#if defined(MTK_GPU_BM_2) && !defined(GPU_BM_PORTING)
-static void get_rec_addr(void)
-{
-#if IS_ENABLED(CONFIG_MTK_TINYSYS_SSPM_SUPPORT)
-	   int i;
-	   unsigned char *ptr;
-
-	   /* get sspm reserved mem */
-	   rec_phys_addr = sspm_reserve_mem_get_phys(GPU_MEM_ID);
-	   rec_virt_addr = sspm_reserve_mem_get_virt(GPU_MEM_ID);
-	   rec_size = sspm_reserve_mem_get_size(GPU_MEM_ID);
-
-	   /* clear */
-	   ptr = (unsigned char *)(uintptr_t)rec_virt_addr;
-	   for (i = 0; i < rec_size; i++)
-			ptr[i] = 0x0;
-
-	   gpu_info_ref = (struct v1_data *)(uintptr_t)rec_virt_addr;
-#endif
-}
-
-static int mtk_bandwith_resource_init(struct kbase_device *kbdev)
-{
-		int err = 0;
-
-		get_rec_addr();
-#if IS_ENABLED(CONFIG_MTK_TINYSYS_SSPM_SUPPORT)
-		if(gpu_info_ref == NULL) {
-			err = -1;
-			pr_debug("%s: get sspm reserved memory fail\n", __func__);
-			return err;
-		}
-		kbdev->v1 = gpu_info_ref;
-		kbdev->v1->version = 1;
-		kbdev->job_status_addr.phyaddr = rec_phys_addr;
-		MTKGPUQoS_setup(kbdev->v1, kbdev->job_status_addr.phyaddr, rec_size);
-#endif
-		return err;
-}
-#endif
 
 /**
  * mali_kbase_supports_cap - Query whether a kbase capability is supported
@@ -1486,9 +1435,6 @@ static int kbasep_kcpu_queue_enqueue(struct kbase_context *kctx,
 static int kbasep_cs_tiler_heap_init(struct kbase_context *kctx,
 		union kbase_ioctl_cs_tiler_heap_init *heap_init)
 {
-	if (heap_init->in.group_id >= MEMORY_GROUP_MANAGER_NR_GROUPS)
-		return -EINVAL;
-
 	kctx->jit_group_id = heap_init->in.group_id;
 
 	return kbase_csf_tiler_heap_init(kctx, heap_init->in.chunk_size,
@@ -2070,9 +2016,6 @@ static ssize_t kbase_read(struct file *filp, char __user *buf, size_t count, lof
 	if (unlikely(!kctx))
 		return -EPERM;
 
-	if (count < data_size)
-		return -ENOBUFS;
-
 	if (atomic_read(&kctx->event_count))
 		read_event = true;
 	else
@@ -2117,8 +2060,6 @@ static ssize_t kbase_read(struct file *filp, char __user *buf, size_t count, lof
 
 	if (count < sizeof(uevent))
 		return -ENOBUFS;
-
-	memset(&uevent, 0, sizeof(uevent));
 
 	do {
 		while (kbase_event_dequeue(kctx, &uevent)) {
@@ -3159,6 +3100,10 @@ static ssize_t kbase_show_gpuinfo(struct device *dev,
 		  .name = "Mali-G510" },
 		{ .id = GPU_ID2_PRODUCT_TVAX >> GPU_ID_VERSION_PRODUCT_ID_SHIFT,
 		  .name = "Mali-G310" },
+		{ .id = GPU_ID2_PRODUCT_TTUX >> GPU_ID_VERSION_PRODUCT_ID_SHIFT,
+		  .name = "Mali-TTUX" },
+		{ .id = GPU_ID2_PRODUCT_LTUX >> GPU_ID_VERSION_PRODUCT_ID_SHIFT,
+		  .name = "Mali-LTUX" },
 	};
 	const char *product_name = "(Unknown Mali GPU)";
 	struct kbase_device *kbdev;
@@ -4754,7 +4699,7 @@ int kbase_device_debugfs_init(struct kbase_device *kbdev)
 
 	kbdev->mali_debugfs_directory = debugfs_create_dir(kbdev->devname,
 			NULL);
-	if (!kbdev->mali_debugfs_directory) {
+	if (IS_ERR_OR_NULL(kbdev->mali_debugfs_directory)) {
 		dev_err(kbdev->dev,
 			"Couldn't create mali debugfs directory: %s\n",
 			kbdev->devname);
@@ -4764,7 +4709,7 @@ int kbase_device_debugfs_init(struct kbase_device *kbdev)
 
 	kbdev->debugfs_ctx_directory = debugfs_create_dir("ctx",
 			kbdev->mali_debugfs_directory);
-	if (!kbdev->debugfs_ctx_directory) {
+	if (IS_ERR_OR_NULL(kbdev->debugfs_ctx_directory)) {
 		dev_err(kbdev->dev, "Couldn't create mali debugfs ctx directory\n");
 		err = -ENOMEM;
 		goto out;
@@ -4772,7 +4717,7 @@ int kbase_device_debugfs_init(struct kbase_device *kbdev)
 
 	kbdev->debugfs_instr_directory = debugfs_create_dir("instrumentation",
 			kbdev->mali_debugfs_directory);
-	if (!kbdev->debugfs_instr_directory) {
+	if (IS_ERR_OR_NULL(kbdev->debugfs_instr_directory)) {
 		dev_err(kbdev->dev, "Couldn't create mali debugfs instrumentation directory\n");
 		err = -ENOMEM;
 		goto out;
@@ -4780,7 +4725,7 @@ int kbase_device_debugfs_init(struct kbase_device *kbdev)
 
 	debugfs_ctx_defaults_directory = debugfs_create_dir("defaults",
 			kbdev->debugfs_ctx_directory);
-	if (!debugfs_ctx_defaults_directory) {
+	if (IS_ERR_OR_NULL(debugfs_ctx_defaults_directory)) {
 		dev_err(kbdev->dev, "Couldn't create mali debugfs ctx defaults directory\n");
 		err = -ENOMEM;
 		goto out;
@@ -4797,6 +4742,8 @@ int kbase_device_debugfs_init(struct kbase_device *kbdev)
 #ifdef CONFIG_MALI_PRFCNT_SET_SELECT_VIA_DEBUG_FS
 	kbase_instr_backend_debugfs_init(kbdev);
 #endif
+	kbase_pbha_debugfs_init(kbdev);
+
 	/* fops_* variables created by invocations of macro
 	 * MAKE_QUIRK_ACCESSORS() above.
 	 */
@@ -5089,36 +5036,6 @@ static struct attribute *kbase_scheduling_attrs[] = {
 	NULL
 };
 
-static ssize_t total_gpu_mem_show(
-	struct device *dev,
-	struct device_attribute *attr,
-	char *const buf)
-{
-	struct kbase_device *kbdev;
-	kbdev = to_kbase_device(dev);
-	if (!kbdev)
-		return -ENODEV;
-
-	return sysfs_emit(buf, "%lu\n",
-		(unsigned long) kbdev->total_gpu_pages << PAGE_SHIFT);
-}
-static DEVICE_ATTR_RO(total_gpu_mem);
-
-static ssize_t dma_buf_gpu_mem_show(
-	struct device *dev,
-	struct device_attribute *attr,
-	char *const buf)
-{
-	struct kbase_device *kbdev;
-	kbdev = to_kbase_device(dev);
-	if (!kbdev)
-		return -ENODEV;
-
-	return sysfs_emit(buf, "%lu\n",
-		(unsigned long) kbdev->dma_buf_pages << PAGE_SHIFT);
-}
-static DEVICE_ATTR_RO(dma_buf_gpu_mem);
-
 static struct attribute *kbase_attrs[] = {
 #ifdef CONFIG_MALI_DEBUG
 	&dev_attr_debug_command.attr,
@@ -5152,8 +5069,6 @@ static struct attribute *kbase_attrs[] = {
 #if !MALI_USE_CSF
 	&dev_attr_js_ctx_scheduling_mode.attr,
 #endif /* !MALI_USE_CSF */
-    &dev_attr_total_gpu_mem.attr,
-	&dev_attr_dma_buf_gpu_mem.attr,
 	NULL
 };
 
@@ -5215,9 +5130,6 @@ int kbase_sysfs_init(struct kbase_device *kbdev)
 			&kbase_attr_group);
 	}
 
-    kbdev->proc_sysfs_node = kobject_create_and_add("kprcs",
-			&kbdev->dev->kobj);
-
 	return err;
 }
 
@@ -5226,8 +5138,6 @@ void kbase_sysfs_term(struct kbase_device *kbdev)
 	sysfs_remove_group(&kbdev->dev->kobj, &kbase_mempool_attr_group);
 	sysfs_remove_group(&kbdev->dev->kobj, &kbase_scheduling_attr_group);
 	sysfs_remove_group(&kbdev->dev->kobj, &kbase_attr_group);
-	kobject_del(kbdev->proc_sysfs_node);
-	kobject_put(kbdev->proc_sysfs_node);
 	put_device(kbdev->dev);
 }
 
@@ -5238,9 +5148,6 @@ static int kbase_platform_device_remove(struct platform_device *pdev)
 	if (!kbdev)
 		return -ENODEV;
 
-#if IS_ENABLED(CONFIG_PROC_FS)
-	mtk_common_procfs_exit();
-#endif
 	kbase_device_term(kbdev);
 	dev_set_drvdata(kbdev->dev, NULL);
 	kbase_device_free(kbdev);
@@ -5273,14 +5180,6 @@ static int kbase_platform_device_probe(struct platform_device *pdev)
 	struct kbase_device *kbdev;
 	int err = 0;
 
-	// *** MTK *** : make sure gpufreq driver is ready
-	pr_info("%s start\n", __func__);
-#if !defined(CONFIG_MACH_MT6768) && !defined(CONFIG_MACH_MT6785)
-	if (mt_gpufreq_not_ready()) {
-		pr_info("gpufreq driver is not ready: %d\n", -EPROBE_DEFER);
-		return -EPROBE_DEFER;
-	}
-#endif
 	mali_kbase_print_cs_experimental();
 
 	kbdev = kbase_device_alloc();
@@ -5292,10 +5191,6 @@ static int kbase_platform_device_probe(struct platform_device *pdev)
 	kbdev->dev = &pdev->dev;
 	dev_set_drvdata(kbdev->dev, kbdev);
 
-#if defined(CONFIG_MACH_MT6768) || defined(CONFIG_MACH_MT6785)
-	err |= mtk_common_device_init(kbdev);
-	err |= mtk_platform_device_init(kbdev);
-#endif
 	err = kbase_device_init(kbdev);
 
 	if (err) {
@@ -5309,12 +5204,6 @@ static int kbase_platform_device_probe(struct platform_device *pdev)
 		kbase_device_free(kbdev);
 	} else {
 #ifdef MALI_KBASE_BUILD
-#if IS_ENABLED(CONFIG_PROC_FS)
-		mtk_common_procfs_init();
-#endif
-#if defined(MTK_GPU_BM_2) && !defined(GPU_BM_PORTING)
-		mtk_bandwith_resource_init(kbdev);
-#endif
 		dev_info(kbdev->dev,
 			"Probed as %s\n", dev_name(kbdev->mdev.this_device));
 #endif /* MALI_KBASE_BUILD */
@@ -5413,11 +5302,18 @@ static int kbase_device_resume(struct device *dev)
 static int kbase_device_runtime_suspend(struct device *dev)
 {
 	struct kbase_device *kbdev = to_kbase_device(dev);
+	int ret = 0;
 
 	if (!kbdev)
 		return -ENODEV;
 
 	dev_dbg(dev, "Callback %s\n", __func__);
+
+#if MALI_USE_CSF
+	ret = kbase_pm_handle_runtime_suspend(kbdev);
+	if (ret)
+		return ret;
+#endif
 
 #ifdef CONFIG_MALI_MIDGARD_DVFS
 	kbase_pm_metrics_stop(kbdev);
@@ -5432,7 +5328,7 @@ static int kbase_device_runtime_suspend(struct device *dev)
 		kbdev->pm.backend.callback_power_runtime_off(kbdev);
 		dev_dbg(dev, "runtime suspend\n");
 	}
-	return 0;
+	return ret;
 }
 #endif /* KBASE_PM_RUNTIME */
 
@@ -5520,7 +5416,9 @@ static const struct dev_pm_ops kbase_pm_ops = {
 
 #if IS_ENABLED(CONFIG_OF)
 static const struct of_device_id kbase_dt_ids[] = {
-	{ .compatible = "arm,mali-valhall" },
+	{ .compatible = "arm,malit6xx" },
+	{ .compatible = "arm,mali-midgard" },
+	{ .compatible = "arm,mali-bifrost" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, kbase_dt_ids);

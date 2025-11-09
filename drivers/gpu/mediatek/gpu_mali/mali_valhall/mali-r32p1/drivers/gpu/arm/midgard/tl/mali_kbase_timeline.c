@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2015-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2015-2021 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -42,59 +42,6 @@
 
 /*****************************************************************************/
 
-#ifndef MALI_STRIP_KBASE_DEVELOPMENT
-/* Development builds need to test instrumentation and enable unprivileged
- * processes to acquire timeline streams, in order to avoid complications
- * with configurations across multiple platforms and systems.
- *
- * Release builds, instead, shall deny access to unprivileged processes
- * because there are no use cases where they are allowed to acquire timeline
- * streams, unless they're given special permissions by a privileged process.
- */
-static int kbase_unprivileged_global_profiling = 1;
-#else
-static int kbase_unprivileged_global_profiling;
-#endif
-
-/**
- * kbase_unprivileged_global_profiling_set - set permissions for unprivileged processes
- *
- * @val: String containing value to set. Only strings representing positive
- *       integers are accepted as valid; any non-positive integer (including 0)
- *       is rejected.
- * @kp: Module parameter associated with this method.
- *
- * This method can only be used to enable permissions for unprivileged processes,
- * if they are disabled: for this reason, the only values which are accepted are
- * strings representing positive integers. Since it's impossible to disable
- * permissions once they're set, any integer which is non-positive is rejected,
- * including 0.
- *
- * Return: 0 if success, otherwise error code.
- */
-static int kbase_unprivileged_global_profiling_set(const char *val, const struct kernel_param *kp)
-{
-	int new_val;
-	int ret = kstrtoint(val, 0, &new_val);
-
-	if (ret == 0) {
-		if (new_val < 1)
-			return -EINVAL;
-
-		kbase_unprivileged_global_profiling = 1;
-	}
-
-	return ret;
-}
-
-static const struct kernel_param_ops kbase_global_unprivileged_profiling_ops = {
-	.get = param_get_int,
-	.set = kbase_unprivileged_global_profiling_set,
-};
-
-module_param_cb(kbase_unprivileged_global_profiling, &kbase_global_unprivileged_profiling_ops,
-		&kbase_unprivileged_global_profiling, 0600);
-
 /* These values are used in mali_kbase_tracepoints.h
  * to retrieve the streams from a kbase_timeline instance.
  */
@@ -105,15 +52,6 @@ const size_t __obj_stream_offset =
 const size_t __aux_stream_offset =
 	offsetof(struct kbase_timeline, streams)
 	+ sizeof(struct kbase_tlstream) * TL_STREAM_TYPE_AUX;
-
-static bool timeline_is_permitted(void)
-{
-#if KERNEL_VERSION(5, 8, 0) <= LINUX_VERSION_CODE
-	return kbase_unprivileged_global_profiling || perfmon_capable();
-#else
-	return kbase_unprivileged_global_profiling || capable(CAP_SYS_ADMIN);
-#endif
-}
 
 /**
  * kbasep_timeline_autoflush_timer_callback - autoflush timer callback
@@ -252,9 +190,6 @@ int kbase_timeline_io_acquire(struct kbase_device *kbdev, u32 flags)
 	u32 timeline_flags = TLSTREAM_ENABLED | flags;
 	struct kbase_timeline *timeline = kbdev->timeline;
 
-	if (!timeline_is_permitted())
-		return -EPERM;
-
 	if (!atomic_cmpxchg(timeline->timeline_flags, 0, timeline_flags)) {
 		int rcode;
 
@@ -289,13 +224,6 @@ int kbase_timeline_io_acquire(struct kbase_device *kbdev, u32 flags)
 		timeline->obj_header_btc = obj_desc_header_size;
 		timeline->aux_header_btc = aux_desc_header_size;
 
-		/* Start autoflush timer. */
-		atomic_set(&timeline->autoflush_timer_active, 1);
-		rcode = mod_timer(
-				&timeline->autoflush_timer,
-				jiffies + msecs_to_jiffies(AUTOFLUSH_INTERVAL));
-		CSTD_UNUSED(rcode);
-
 #if !MALI_USE_CSF
 		/* If job dumping is enabled, readjust the software event's
 		 * timeout as the default value of 3 seconds is often
@@ -323,6 +251,16 @@ int kbase_timeline_io_acquire(struct kbase_device *kbdev, u32 flags)
 		kbase_tlstream_current_devfreq_target(kbdev);
 #endif /* CONFIG_MALI_DEVFREQ */
 
+		/* Start the autoflush timer.
+		 * We must do this after creating timeline objects to ensure we
+		 * don't auto-flush the streams which will be reset during the
+		 * summarization process.
+		 */
+		atomic_set(&timeline->autoflush_timer_active, 1);
+		rcode = mod_timer(&timeline->autoflush_timer,
+				  jiffies +
+					  msecs_to_jiffies(AUTOFLUSH_INTERVAL));
+		CSTD_UNUSED(rcode);
 	} else {
 		ret = -EBUSY;
 	}

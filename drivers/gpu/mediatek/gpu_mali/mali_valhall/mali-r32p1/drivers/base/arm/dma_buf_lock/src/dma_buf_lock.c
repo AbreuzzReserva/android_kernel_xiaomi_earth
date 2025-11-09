@@ -85,7 +85,7 @@ static struct cdev dma_buf_lock_cdev;
 static struct class *dma_buf_lock_class;
 static char dma_buf_lock_dev_name[] = "dma_buf_lock";
 
-#ifdef HAVE_UNLOCKED_IOCTL
+#if defined(HAVE_UNLOCKED_IOCTL) || defined(HAVE_COMPAT_IOCTL) || ((KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE))
 static long dma_buf_lock_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 #else
 static int dma_buf_lock_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, unsigned long arg);
@@ -94,12 +94,15 @@ static int dma_buf_lock_ioctl(struct inode *inode, struct file *filp, unsigned i
 static struct file_operations dma_buf_lock_fops =
 {
 	.owner   = THIS_MODULE,
-#ifdef HAVE_UNLOCKED_IOCTL
+#if defined(HAVE_UNLOCKED_IOCTL) || ((KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE))
 	.unlocked_ioctl   = dma_buf_lock_ioctl,
-#else
+#endif
+#if defined(HAVE_COMPAT_IOCTL) || ((KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE))
+	.compat_ioctl   = dma_buf_lock_ioctl,
+#endif
+#if !defined(HAVE_UNLOCKED_IOCTL) && !defined(HAVE_COMPAT_IOCTL) && ((KERNEL_VERSION(2, 6, 36) > LINUX_VERSION_CODE))
 	.ioctl   = dma_buf_lock_ioctl,
 #endif
-	.compat_ioctl   = dma_buf_lock_ioctl,
 };
 
 typedef struct dma_buf_lock_resource
@@ -533,12 +536,10 @@ static int dma_buf_lock_dolock(dma_buf_lock_k_request *request)
 {
 	dma_buf_lock_resource *resource;
 	struct ww_acquire_ctx ww_ctx;
-	struct file *file;
 	int size;
 	int fd;
 	int i;
 	int ret;
-	int error;
 
 	if (request->list_of_dma_buf_fds == NULL)
 		return -EINVAL;
@@ -638,21 +639,16 @@ static int dma_buf_lock_dolock(dma_buf_lock_k_request *request)
 
 	kref_get(&resource->refcount);
 
-	error = get_unused_fd_flags(0);
-	if (error < 0)
-		return error;
-
-	fd = error;
-
-	file = anon_inode_getfile("dma_buf_lock", &dma_buf_lock_handle_fops, (void *)resource, 0);
-
-	if (IS_ERR(file)) {
-		put_unused_fd(fd);
+	/* Create file descriptor associated with lock request */
+	fd = anon_inode_getfd("dma_buf_lock", &dma_buf_lock_handle_fops,
+	                      (void *)resource, 0);
+	if (fd < 0)
+	{
 		mutex_lock(&dma_buf_lock_mutex);
 		kref_put(&resource->refcount, dma_buf_lock_dounlock);
 		kref_put(&resource->refcount, dma_buf_lock_dounlock);
 		mutex_unlock(&dma_buf_lock_mutex);
-		return PTR_ERR(file);
+		return fd;
 	}
 
 	resource->exclusive = request->exclusive;
@@ -721,7 +717,9 @@ static int dma_buf_lock_dolock(dma_buf_lock_k_request *request)
 			dma_resv_add_shared_fence(resv, &resource->fence);
 #endif
 		} else {
-			ret = dma_buf_lock_add_fence_reservation_callback(resource, resv, true);
+			ret = dma_buf_lock_add_fence_reservation_callback(resource,
+									  resv,
+									  true);
 			if (ret) {
 #if DMA_BUF_LOCK_DEBUG
 				printk(KERN_DEBUG "dma_buf_lock_dolock : Error %d adding reservation to callback.\n", ret);
@@ -767,10 +765,6 @@ static int dma_buf_lock_dolock(dma_buf_lock_k_request *request)
 	kref_put(&resource->refcount, dma_buf_lock_dounlock);
 	mutex_unlock(&dma_buf_lock_mutex);
 
-	/* Installing the fd is deferred to the very last operation before return
-	 * to avoid allowing userspace to close it during the setup.
-	 */
-	fd_install(fd, file);
 	return fd;
 }
 
@@ -819,7 +813,9 @@ static int __init dma_buf_lock_init(void)
 			else
 			{
 				struct device *mdev;
-				mdev = device_create(dma_buf_lock_class, NULL, dma_buf_lock_dev, NULL, dma_buf_lock_dev_name);
+				mdev = device_create(
+					dma_buf_lock_class, NULL, dma_buf_lock_dev,
+					NULL, "%s", dma_buf_lock_dev_name);
 				if (!IS_ERR(mdev))
 					return 0;
 
@@ -870,7 +866,7 @@ static void __exit dma_buf_lock_exit(void)
 	unregister_chrdev_region(dma_buf_lock_dev, 1);
 }
 
-#ifdef HAVE_UNLOCKED_IOCTL
+#if defined(HAVE_UNLOCKED_IOCTL) || defined(HAVE_COMPAT_IOCTL) || ((KERNEL_VERSION(5, 9, 0) <= LINUX_VERSION_CODE))
 static long dma_buf_lock_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 #else
 static int dma_buf_lock_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, unsigned long arg)

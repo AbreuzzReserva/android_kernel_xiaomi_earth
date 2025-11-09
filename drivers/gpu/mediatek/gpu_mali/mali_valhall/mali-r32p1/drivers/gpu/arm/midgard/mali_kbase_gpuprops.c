@@ -34,7 +34,6 @@
 #include <linux/of_platform.h>
 #include <linux/moduleparam.h>
 
-#include <mtk_gpufreq.h>
 
 static void kbase_gpuprops_construct_coherent_groups(
 	struct base_gpu_props * const props)
@@ -119,9 +118,7 @@ int kbase_gpuprops_get_curr_config_props(struct kbase_device *kbdev,
 {
 	struct kbase_current_config_regdump curr_config_regdump;
 	int err;
-#if !defined(CONFIG_MACH_MT6768)
-	u64 force_shader_present = 0;
-#endif
+
 	if (WARN_ON(!kbdev) || WARN_ON(!curr_config))
 		return -EINVAL;
 
@@ -146,19 +143,6 @@ int kbase_gpuprops_get_curr_config_props(struct kbase_device *kbdev,
 		((u64) curr_config_regdump.shader_present_hi << 32) +
 		curr_config_regdump.shader_present_lo;
 
-#if !defined(CONFIG_MACH_MT6768) && !defined(CONFIG_MACH_MT6785)
-	/* MTK Modify: Force to set current shader_present. */
-	force_shader_present = (u64)mt_gpufreq_get_shader_present();
-	if (force_shader_present != 0 &&
-		(force_shader_present != curr_config->shader_present) &&
-		(force_shader_present & curr_config->shader_present)) {
-		dev_info(kbdev->dev, "Force curr_config shader_present from 0x%llX to 0x%llX",
-			curr_config->shader_present,
-			force_shader_present & curr_config->shader_present);
-
-		curr_config->shader_present &= force_shader_present;
-	}
-#endif
 	curr_config->num_cores = hweight64(curr_config->shader_present);
 
 	curr_config->update_needed = false;
@@ -200,9 +184,6 @@ static int kbase_gpuprops_get_props(struct base_gpu_props * const gpu_props,
 	struct kbase_gpuprops_regdump regdump;
 	int i;
 	int err;
-#if !defined(CONFIG_MACH_MT6768)
-	u64 force_shader_present = 0;
-#endif
 
 	KBASE_DEBUG_ASSERT(kbdev != NULL);
 	KBASE_DEBUG_ASSERT(gpu_props != NULL);
@@ -224,21 +205,6 @@ static int kbase_gpuprops_get_props(struct base_gpu_props * const gpu_props,
 	gpu_props->raw_props.shader_present =
 		((u64) regdump.shader_present_hi << 32) +
 		regdump.shader_present_lo;
-
-#if !defined(CONFIG_MACH_MT6768) && !defined(CONFIG_MACH_MT6785)
-	/* MTK Modify: Force to set current shader_present. */
-	force_shader_present = (u64)mt_gpufreq_get_shader_present();
-
-	if (force_shader_present != 0 &&
-		(force_shader_present != gpu_props->raw_props.shader_present) &&
-		(force_shader_present & gpu_props->raw_props.shader_present)) {
-		dev_info(kbdev->dev, "Force shader_present from 0x%llX to 0x%llX",
-		gpu_props->raw_props.shader_present,
-		force_shader_present & gpu_props->raw_props.shader_present);
-
-		gpu_props->raw_props.shader_present &= force_shader_present;
-	}
-#endif
 	gpu_props->raw_props.tiler_present =
 		((u64) regdump.tiler_present_hi << 32) +
 		regdump.tiler_present_lo;
@@ -695,6 +661,19 @@ int kbase_gpuprops_update_l2_features(struct kbase_device *kbdev)
 		dev_info(kbdev->dev, "Reflected L2_CONFIG is 0x%08x\n",
 			 regdump.l2_config);
 
+		if (kbase_hw_has_feature(kbdev, BASE_HW_FEATURE_ASN_HASH)) {
+			int idx;
+			const bool asn_he = regdump.l2_config &
+					    L2_CONFIG_ASN_HASH_ENABLE_MASK;
+			if (!asn_he && kbdev->l2_hash_values_override)
+				dev_err(kbdev->dev,
+					"Failed to use requested ASN_HASH, fallback to default");
+			for (idx = 0; idx < ASN_HASH_COUNT; idx++)
+				dev_info(kbdev->dev,
+					 "%s ASN_HASH[%d] is [0x%08x]\n",
+					 asn_he ? "Overridden" : "Default", idx,
+					 regdump.l2_asn_hash[idx]);
+		}
 
 		/* Update gpuprops with reflected L2_FEATURES */
 		gpu_props->raw_props.l2_features = regdump.l2_features;
